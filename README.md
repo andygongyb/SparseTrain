@@ -1,9 +1,10 @@
-> Intel MKL-DNN repository migrated to [https://github.com/intel/mkl-dnn](https://github.com/intel/mkl-dnn).
-> The old address will continue to be available and will redirect to the new repo.
-> Please update your links.
+# SparseTrain: Leveraging Dynamic Sparsity in Training DNNs on General-Purpose SIMD Processors based on Intel(R) Math Kernel Library for Deep Neural Networks (Intel(R) MKL-DNN)
 
-# Intel(R) Math Kernel Library for Deep Neural Networks (Intel(R) MKL-DNN)
-![v0.16 beta](https://img.shields.io/badge/v0.16-beta-orange.svg)
+Our community has made great strides at improving the efficiency of deep learning applications.  This includes work on exploiting sparsity in both activations and weights.  Most of that work, though, is for inference, where sparsity is known statically, and/or for specialized hardware.  We propose a scheme to leverage dynamic sparsity during training.  In particular, we exploit sparsity introduced by the ReLU activation function to both feature maps and their gradients, during both forward and backward propagation. This is challenging because the sparsity degree is moderate and the locations of the zeros change throughout the training process.  We also rely purely on software techniques, rather than hardware support.
+
+Our approach extracts sparsity from a dense data representation without transforming the data, and performs conventional vectorized computation. Variations of the scheme are applicable to all three major components of training: forward propagation, backward propagation by inputs, and backward propagation by weights. We apply our scheme to convolutional layers in several popular deep neural networks.  Our implementation incurs only modest overhead for exploiting sparsity, and significantly outperforms a highly-optimized dense direct convolution. At realistic sparsity, we speedup the training of the convolutional layers in VGG16, ResNet-34, and ResNet-50 by 1.88x, 1.51x, and 1.46x respectively on a Skylake-X CPU.
+
+## README from the original MKL-DNN
 
 Intel(R) Math Kernel Library for Deep Neural Networks (Intel(R) MKL-DNN) is
 an open source performance library for deep learning applications. The library
