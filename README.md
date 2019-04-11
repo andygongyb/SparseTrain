@@ -6,6 +6,8 @@ Our approach extracts sparsity from a dense data representation without transfor
 
 **Currently, parsTrain only supports machines with AVX-512 support, such as the Intel Skylake-X generation**
 
+You can build SparseTrain by following MKL-DNN's build guide. Please build with Intel C++ Compiler (ICC).
+
 ## README from the original MKL-DNN
 
 Intel(R) Math Kernel Library for Deep Neural Networks (Intel(R) MKL-DNN) is
