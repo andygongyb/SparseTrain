@@ -4,6 +4,8 @@ Our community has made great strides at improving the efficiency of deep learnin
 
 Our approach extracts sparsity from a dense data representation without transforming the data, and performs conventional vectorized computation. Variations of the scheme are applicable to all three major components of training: forward propagation, backward propagation by inputs, and backward propagation by weights. We apply our scheme to convolutional layers in several popular deep neural networks.  Our implementation incurs only modest overhead for exploiting sparsity, and significantly outperforms a highly-optimized dense direct convolution. At realistic sparsity, we speedup the training of the convolutional layers in VGG16, ResNet-34, and ResNet-50 by 1.88x, 1.51x, and 1.46x respectively on a Skylake-X CPU.
 
+**Currently, parsTrain only supports machines with AVX-512 support, such as the Intel Skylake-X generation**
+
 ## README from the original MKL-DNN
 
 Intel(R) Math Kernel Library for Deep Neural Networks (Intel(R) MKL-DNN) is
