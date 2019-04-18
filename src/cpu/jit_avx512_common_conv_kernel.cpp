@@ -253,7 +253,7 @@ void jit_avx512_common_conv_fwd_kernel::compute_loop_fma_sparse() {
         }
     };
 
-    auto comp_unrolled = [&](int ii, int step, int cur_oc_buffs) {
+    auto comp_step = [&](int ii, int offset, int step, int cur_oc_buffs) {
 
         Reg64 mask_reg = reg_oi;
         Reg32 ic_itr_reg = reg_kh.cvt32();
@@ -263,7 +263,7 @@ void jit_avx512_common_conv_fwd_kernel::compute_loop_fma_sparse() {
         popcnt(ic_itr_reg, mask_reg.cvt32());
 
         if (ii < iw - step) { // pipelined
-            size_t aux_src_offset = typesize * (ii + step) * ic_block;
+            size_t aux_src_offset = typesize * (ii + step - offset) * ic_block;
             vcmpps(k7, zmm_zero, EVEX_compress_addr_safe(reg_inp, aux_src_offset,
                                     reg_long_offt), 4);
 
@@ -299,7 +299,7 @@ void jit_avx512_common_conv_fwd_kernel::compute_loop_fma_sparse() {
                         
                             size_t aux_dst_offset = (size_t)typesize
                                 * (oc_buff * oc_block * ow * mb_block
-                                + oi * oc_block);
+                                + (oi - offset / stride_w) * oc_block);
                             vmovups(EVEX_compress_addr_safe(reg_out, aux_dst_offset,
                                         reg_long_offt), zmm);
                         }
@@ -332,7 +332,7 @@ void jit_avx512_common_conv_fwd_kernel::compute_loop_fma_sparse() {
 
                             size_t aux_dst_offset = (size_t)typesize
                                 * (oc_buff * oc_block * ow * mb_block
-                                + oi * oc_block);
+                                + (oi - offset / stride_w) * oc_block);
 
                             vmovups(zmm, EVEX_compress_addr_safe(reg_out, aux_dst_offset,
                                         reg_long_offt));
@@ -368,7 +368,7 @@ void jit_avx512_common_conv_fwd_kernel::compute_loop_fma_sparse() {
 
                                 size_t aux_dst_offset = (size_t)typesize
                                     * (oc_buff * oc_block * ow * mb_block
-                                    + oi * oc_block);
+                                    + (oi - offset / stride_w) * oc_block);
 
                                 vmovups(zmm, EVEX_compress_addr_safe(reg_out, aux_dst_offset,
                                             reg_long_offt));
@@ -379,28 +379,7 @@ void jit_avx512_common_conv_fwd_kernel::compute_loop_fma_sparse() {
                         }
                     }
                 }
-            }/* else {
-                for (int ki = kw - 1; ki > -1; ki--) {
-                    for (int oc_buff = 0; oc_buff < cur_oc_buffs; oc_buff++) {
-
-                        int n = - ki * dilate_w + l_pad;
-
-                        if (n >= 0 && n / stride_w < ow && n % stride_w == 0) {
-
-                            int oi = n / stride_w;
-
-                            size_t aux_dst_offset = (size_t)typesize
-                                * (oc_buff * oc_block * ow * mb_block
-                                + oi * oc_block);
-
-                            //prefetcht1(EVEX_compress_addr_safe(reg_out_prf, aux_dst_offset,
-                            //            reg_long_offt));
-
-                        }
-                    }
-                }
-
-            }*/
+            }
 
         } else {
             for (int ki = kw - 1; ki > -1; ki--) {
@@ -425,7 +404,7 @@ void jit_avx512_common_conv_fwd_kernel::compute_loop_fma_sparse() {
 
                             size_t aux_dst_offset = (size_t)typesize
                                 * (oc_buff * oc_block * ow * mb_block
-                                + oi * oc_block);
+                                + (oi - offset / stride_w) * oc_block);
 
                             vmovups(zmm, EVEX_compress_addr_safe(reg_out, aux_dst_offset,
                                         reg_long_offt));
@@ -455,7 +434,7 @@ void jit_avx512_common_conv_fwd_kernel::compute_loop_fma_sparse() {
 
             lea(aux_reg_inp, ptr[aux_reg_inp + lzcnt_reg * typesize]);
 
-            int aux_src_offset = typesize * (ii * ic_block - 1);
+            int aux_src_offset = typesize * ((ii - offset) * ic_block - 1);
             vbroadcastss(zmm_o, ptr[aux_reg_inp + aux_src_offset]);
 
             shl(lzcnt_reg.cvt32(), 6);
@@ -521,7 +500,7 @@ void jit_avx512_common_conv_fwd_kernel::compute_loop_fma_sparse() {
                         
                         size_t aux_dst_offset = (size_t)typesize
                             * (oc_buff * oc_block * ow * mb_block
-                            + n / stride_w * oc_block);
+                            + (n / stride_w - offset / stride_w) * oc_block);
                         vmovups(EVEX_compress_addr_safe(reg_out, aux_dst_offset,
                                     reg_long_offt), zmm);
                     }
@@ -537,29 +516,33 @@ void jit_avx512_common_conv_fwd_kernel::compute_loop_fma_sparse() {
 
         sub(reg_ker, oc_block * typesize);
 
-        int rotation_unroll_factor = cur_oc_buffs * (kw + 1) <= 30 ? (kw + 1) * stride_w : kw * stride_w;
+        int unroll_factor = cur_oc_buffs * (kw + 1) <= 30 ? (kw + 1) * stride_w : kw * stride_w;
+        if (unroll_factor < 3) {
+            unroll_factor *= 3;
+        }
+
         int l_iw = kw > l_pad ? kw - l_pad : 1;
         l_iw++; // unroll one more due to pipelined vector write
 
-        int r_iw = iw - 1 - (iw - 1 - l_iw) % rotation_unroll_factor;
+        int r_iw = iw - 1 - (iw - 1 - l_iw) % unroll_factor;
 
-        if (l_iw <= r_iw - rotation_unroll_factor * 5) { // threshold needs to be dynamically calculated based on the instruction count per section
+        if (l_iw <= r_iw - unroll_factor * 5) { // threshold needs to be dynamically calculated based on the instruction count per section
 
 
-            int niter = (r_iw - l_iw) / rotation_unroll_factor;
+            int niter = (r_iw - l_iw) / unroll_factor;
 
             cout << "nr:" << nr << " l_iw:" << l_iw << " r_iw:" << r_iw << " oc_iters:" << oc_iters
                 << " oc_buffs:" << oc_buffs << endl;
 
             cout << "leading :" << l_iw << " trailing:" << ow - r_iw
-                << " factor:" << rotation_unroll_factor
+                << " factor:" << unroll_factor
                 << " niter:" << niter << endl;
 
             int istart = 0;
             int step = 1; // for now
 
             for (int ii = istart; ii < l_iw; ii++) {
-                comp_unrolled(ii, step, cur_oc_buffs);
+                comp_step(ii, 0, step, cur_oc_buffs);
             }
 
             Reg64 iw_itr_reg = reg_out_prf;
@@ -569,26 +552,22 @@ void jit_avx512_common_conv_fwd_kernel::compute_loop_fma_sparse() {
             Label iw_loop_label;
             L(iw_loop_label); {
 
-                for (int i = 0; i < rotation_unroll_factor; i++) {
-                    comp_unrolled(l_iw + i, step, cur_oc_buffs);
+                for (int i = 0; i < unroll_factor; i++) {
+                    comp_step(l_iw + i, 0, step, cur_oc_buffs);
                 }
 
-                add(reg_inp, ic_block * typesize * rotation_unroll_factor);
-                add(reg_out, oc_block * typesize * rotation_unroll_factor / stride_w);
+                add(reg_inp, ic_block * typesize * unroll_factor);
+                add(reg_out, oc_block * typesize * unroll_factor / stride_w);
 
-                add(reg_inp_prf, ic_block * typesize * rotation_unroll_factor);
+                add(reg_inp_prf, ic_block * typesize * unroll_factor);
 
                 dec(iw_itr_reg);
                 jnz(iw_loop_label, T_NEAR);
 
             }
 
-            sub(reg_inp, ic_block * typesize * rotation_unroll_factor * niter);
-            sub(reg_out, oc_block * typesize * rotation_unroll_factor / stride_w * niter);
-            sub(reg_inp_prf, ic_block * typesize * rotation_unroll_factor * niter);
-
             for (int ii = r_iw; ii < iw; ii++) {
-                comp_unrolled(ii, step, cur_oc_buffs);
+                comp_step(ii, unroll_factor * niter, step, cur_oc_buffs);
             }
 
         } else {
@@ -604,7 +583,7 @@ void jit_avx512_common_conv_fwd_kernel::compute_loop_fma_sparse() {
             }
 
             for (int ii = istart; ii < iw; ii += step) {
-                comp_unrolled(ii, step, cur_oc_buffs);
+                comp_step(ii, 0, step, cur_oc_buffs);
             }
         }
     };
@@ -1190,13 +1169,13 @@ void jit_avx512_common_conv_bwd_data_kernel_f32::compute_loop_fma_sparse() {
         r_ow--;
     }
 
-    int rotation_unroll_factor;
+    int unroll_factor;
     int rw = ic_buffs * (kw + 1) <= 30 && stride_w == 1 && kw > 1 ? kw + 1 : kw;
 
     if (stride_w / dilate_w < kw && dilate_w <= stride_w && stride_w % dilate_w == 0) {
-        rotation_unroll_factor = rw % (stride_w / dilate_w) == 0 ? rw / (stride_w / dilate_w) : rw;
+        unroll_factor = rw % (stride_w / dilate_w) == 0 ? rw / (stride_w / dilate_w) : rw;
     } else {
-        rotation_unroll_factor = 1;
+        unroll_factor = 1;
     }
 
     cout << "nr:" << nr << " l_ow:" << l_ow << " r_ow:" << r_ow << " ic_iters:" << ic_iters
@@ -1270,16 +1249,16 @@ void jit_avx512_common_conv_bwd_data_kernel_f32::compute_loop_fma_sparse() {
 
     auto get_reg_idx = [=](int oi, int ic_buff, int ki) {
 
-        int rotation_idx = oi % rotation_unroll_factor;
+        int idx = oi % unroll_factor;
         
         if (stride_w / dilate_w < kw && dilate_w <= stride_w && stride_w % dilate_w == 0) {
-            return ic_buff * rw + ((stride_w / dilate_w) * rotation_idx + ki) % rw;
+            return ic_buff * rw + ((stride_w / dilate_w) * idx + ki) % rw;
         } else {
             return ic_buff * rw + ki;
         }
     };
 
-    auto comp_unrolled = [&](int oi, int cur_ic_buffs) {
+    auto comp_step = [&](int oi, int offset, int cur_ic_buffs) {
 
         Reg64 mask_reg = reg_oi;
         Reg32 oc_itr_reg = reg_kh.cvt32();
@@ -1289,7 +1268,7 @@ void jit_avx512_common_conv_bwd_data_kernel_f32::compute_loop_fma_sparse() {
         popcnt(oc_itr_reg, mask_reg.cvt32());
 
         if (oi < ow - 1) { // pipelined
-            size_t aux_dst_offset = typesize * (oi + 1) * oc_block;
+            size_t aux_dst_offset = typesize * (oi + 1 - offset) * oc_block;
             vcmpps(k7, zmm_zero, EVEX_compress_addr_safe(reg_dst, aux_dst_offset,
                                     reg_long_offt), 4);
 
@@ -1317,7 +1296,8 @@ void jit_avx512_common_conv_bwd_data_kernel_f32::compute_loop_fma_sparse() {
                         
                             size_t aux_src_offset = (size_t)typesize
                                 * (ic_buff * ic_block* mb_block * iw 
-                                + ((oi - 1) * stride_w - l_pad + ki * dilate_w) * ic_block);
+                                + ((oi - 1) * stride_w - l_pad + ki * dilate_w
+                                - offset * stride_w) * ic_block);
                             vmovups(EVEX_compress_addr_safe(reg_src, aux_src_offset,
                                         reg_long_offt), zmm);
                         }
@@ -1342,7 +1322,8 @@ void jit_avx512_common_conv_bwd_data_kernel_f32::compute_loop_fma_sparse() {
 
                             size_t aux_src_offset = (size_t)typesize
                                 * (ic_buff * ic_block * mb_block * iw 
-                                + (oi * stride_w - l_pad + ki * dilate_w) * ic_block);
+                                + (oi * stride_w - l_pad + ki * dilate_w
+                                - offset * stride_w) * ic_block);
 
                             vmovups(zmm, EVEX_compress_addr_safe(reg_src, aux_src_offset,
                                         reg_long_offt));
@@ -1369,7 +1350,8 @@ void jit_avx512_common_conv_bwd_data_kernel_f32::compute_loop_fma_sparse() {
 
                                 size_t aux_src_offset = (size_t)typesize
                                     * (ic_buff * ic_block * mb_block * iw 
-                                    + ((oi + 1) * stride_w - l_pad + ki * dilate_w) * ic_block);
+                                    + ((oi + 1) * stride_w - l_pad + ki * dilate_w
+                                    - offset * stride_w) * ic_block);
 
                                 vmovups(zmm, EVEX_compress_addr_safe(reg_src, aux_src_offset,
                                             reg_long_offt));
@@ -1399,7 +1381,8 @@ void jit_avx512_common_conv_bwd_data_kernel_f32::compute_loop_fma_sparse() {
 
                             size_t aux_src_offset = (size_t)typesize
                                 * (ic_buff * ic_block * mb_block * iw 
-                                + (oi * stride_w - l_pad + ki * dilate_w) * ic_block);
+                                + (oi * stride_w - l_pad + ki * dilate_w
+                                - offset * stride_w) * ic_block);
 
                             vmovups(zmm, EVEX_compress_addr_safe(reg_src, aux_src_offset,
                                         reg_long_offt));
@@ -1429,7 +1412,7 @@ void jit_avx512_common_conv_bwd_data_kernel_f32::compute_loop_fma_sparse() {
 
             lea(aux_reg_dst, ptr[aux_reg_dst + tzcnt_reg * typesize]);
 
-            int aux_dst_offset = typesize * (oi * oc_block - 1);
+            int aux_dst_offset = typesize * ((oi - offset) * oc_block - 1);
             vbroadcastss(zmm_o, ptr[aux_reg_dst + aux_dst_offset]);
 
             shl(tzcnt_reg.cvt32(), 6);
@@ -1484,7 +1467,8 @@ void jit_avx512_common_conv_bwd_data_kernel_f32::compute_loop_fma_sparse() {
                         
                         size_t aux_src_offset = (size_t)typesize
                             * (ic_buff * ic_block * mb_block * iw 
-                            + (oi * stride_w - l_pad + ki * dilate_w) * ic_block);
+                            + (oi * stride_w - l_pad + ki * dilate_w
+                            - offset * stride_w) * ic_block);
                         vmovups(EVEX_compress_addr_safe(reg_src, aux_src_offset,
                                     reg_long_offt), zmm);
                     }
@@ -1498,18 +1482,18 @@ void jit_avx512_common_conv_bwd_data_kernel_f32::compute_loop_fma_sparse() {
 
         sub(reg_ker, ic_block * typesize);
 
-        int rr_ow = r_ow - (r_ow - l_ow) % rotation_unroll_factor;
+        int rr_ow = r_ow - (r_ow - l_ow) % unroll_factor;
 
-        if (l_ow <= rr_ow - rotation_unroll_factor * 5) { // threshold needs to be dynamically calculated based on the instruction count per section
+        if (l_ow <= rr_ow - unroll_factor * 5) { // threshold needs to be dynamically calculated based on the instruction count per section
 
-            int niter = (rr_ow - l_ow) / rotation_unroll_factor;
+            int niter = (rr_ow - l_ow) / unroll_factor;
 
             cout << "leading :" << l_ow << " trailing:" << ow - rr_ow
-                << " factor:" << rotation_unroll_factor
+                << " factor:" << unroll_factor
                 << " niter:" << niter << endl;
 
             for (int oi = 0; oi < l_ow; oi++) {
-                comp_unrolled(oi, cur_ic_buffs);
+                comp_step(oi, 0, cur_ic_buffs);
             }
 
             Reg64 ow_itr_reg = reg_src_prf;
@@ -1519,26 +1503,22 @@ void jit_avx512_common_conv_bwd_data_kernel_f32::compute_loop_fma_sparse() {
             Label ow_loop_label;
             L(ow_loop_label); {
 
-                for (int i = 0; i < rotation_unroll_factor; i++) {
-                    comp_unrolled(l_ow + i, cur_ic_buffs);
+                for (int i = 0; i < unroll_factor; i++) {
+                    comp_step(l_ow + i, 0, cur_ic_buffs);
                 }
 
-                add(reg_dst, oc_block * typesize * rotation_unroll_factor);
-                add(reg_src, ic_block * typesize * rotation_unroll_factor * stride_w);
+                add(reg_dst, oc_block * typesize * unroll_factor);
+                add(reg_src, ic_block * typesize * unroll_factor * stride_w);
 
-                add(reg_dst_prf, oc_block * typesize * rotation_unroll_factor);
+                add(reg_dst_prf, oc_block * typesize * unroll_factor);
 
                 dec(ow_itr_reg);
                 jnz(ow_loop_label, T_NEAR);
 
             }
 
-            sub(reg_dst, oc_block * typesize * rotation_unroll_factor * niter);
-            sub(reg_src, ic_block * typesize * rotation_unroll_factor * stride_w * niter);
-            sub(reg_dst_prf, oc_block * typesize * rotation_unroll_factor * niter);
-
             for (int oi = rr_ow; oi < ow; oi++) {
-                comp_unrolled(oi, cur_ic_buffs);
+                comp_step(oi, unroll_factor * niter, cur_ic_buffs);
             }
 
         } else {
@@ -1546,7 +1526,7 @@ void jit_avx512_common_conv_bwd_data_kernel_f32::compute_loop_fma_sparse() {
             cout << "fully unrolled" << endl;
 
             for (int oi = 0; oi < ow; oi++) {
-                comp_unrolled(oi, cur_ic_buffs);
+                comp_step(oi, 0, cur_ic_buffs);
             }
         }
 
@@ -2072,7 +2052,7 @@ void jit_avx512_common_conv_bwd_weights_kernel_f32::compute_loop_fma_sparse() {
 
     cout << "use_shift:" << use_shift << " disp_shift:" << disp_shift << endl;
 
-    auto comp_unrolled = [&](int ii, int cur_oc_buffs) {
+    auto comp_step = [&](int ii, int offset, int cur_oc_buffs) {
 
         Reg64 mask_reg = reg_oi;
         Reg32 ic_itr_reg = reg_out_prf.cvt32();
@@ -2082,7 +2062,7 @@ void jit_avx512_common_conv_bwd_weights_kernel_f32::compute_loop_fma_sparse() {
         popcnt(ic_itr_reg, mask_reg.cvt32());
 
         if (ii < iw - 1) { // pipelined
-            size_t aux_src_offset = typesize * (ii + 1) * mb_block;
+            size_t aux_src_offset = typesize * (ii + 1 - offset) * mb_block;
             vcmpps(k7, zmm_zero, EVEX_compress_addr_safe(reg_inp, aux_src_offset,
                                     reg_long_offt), 4);
 
@@ -2129,7 +2109,7 @@ void jit_avx512_common_conv_bwd_weights_kernel_f32::compute_loop_fma_sparse() {
 
             lea(aux_reg_inp, ptr[aux_reg_inp + lzcnt_reg * typesize]);
 
-            int aux_src_offset = typesize * (ii * mb_block - 1);
+            int aux_src_offset = typesize * ((ii - offset) * mb_block - 1);
             vbroadcastss(zmm_o, ptr[aux_reg_inp + aux_src_offset]);
 
             if (use_shift) {
@@ -2170,7 +2150,8 @@ void jit_avx512_common_conv_bwd_weights_kernel_f32::compute_loop_fma_sparse() {
 
                         size_t aux_dst_offset = (size_t)typesize
                                 * (oc_buff * oc_block
-                                + oi * oc_block * cur_oc_buffs * mb_block);
+                                + (oi - offset / stride_w) * oc_block
+                                * cur_oc_buffs * mb_block);
                     
                         vfmadd231ps(zmm, zmm_o,
                                 EVEX_compress_addr_safe(aux_reg_out, aux_dst_offset,
@@ -2216,26 +2197,31 @@ void jit_avx512_common_conv_bwd_weights_kernel_f32::compute_loop_fma_sparse() {
             }
         }
 
-        int rotation_unroll_factor = kw * stride_w;
+        int unroll_factor = kw * stride_w;
+
+        if (unroll_factor < 3) {
+            unroll_factor *= 3;
+        }
+
         int l_iw = kw > l_pad ? kw - l_pad : 1;
         l_iw++; // unroll one more due to pipelined vector write
 
-        int r_iw = iw - 1 - (iw - 1 - l_iw) % rotation_unroll_factor;
+        int r_iw = iw - 1 - (iw - 1 - l_iw) % unroll_factor;
 
-        if (l_iw <= r_iw - rotation_unroll_factor * 5) { // threshold needs to be dynamically calculated based on the instruction count per section
+        if (l_iw <= r_iw - unroll_factor * 5) { // threshold needs to be dynamically calculated based on the instruction count per section
 
 
-            int niter = (r_iw - l_iw) / rotation_unroll_factor;
+            int niter = (r_iw - l_iw) / unroll_factor;
 
             cout << "nr:" << nr << " l_iw:" << l_iw << " r_iw:" << r_iw << " oc_iters:" << oc_iters
                 << " oc_buffs:" << oc_buffs << endl;
 
             cout << "leading :" << l_iw << " trailing:" << ow - r_iw
-                << " factor:" << rotation_unroll_factor
+                << " factor:" << unroll_factor
                 << " niter:" << niter << endl;
 
             for (int ii = 0; ii < l_iw; ii++) {
-                comp_unrolled(ii, cur_oc_buffs);
+                comp_step(ii, 0, cur_oc_buffs);
             }
 
             Reg64 iw_itr_reg = reg_channel;
@@ -2245,30 +2231,25 @@ void jit_avx512_common_conv_bwd_weights_kernel_f32::compute_loop_fma_sparse() {
             Label iw_loop_label;
             L(iw_loop_label); {
 
-                for (int i = 0; i < rotation_unroll_factor; i++) {
-                    comp_unrolled(l_iw + i, cur_oc_buffs);
+                for (int i = 0; i < unroll_factor; i++) {
+                    comp_step(l_iw + i, 0, cur_oc_buffs);
                 }
 
-                add(reg_inp, mb_block * typesize * rotation_unroll_factor);
+                add(reg_inp, mb_block * typesize * unroll_factor);
                 add(reg_out, oc_block * cur_oc_buffs * mb_block * typesize
-                    * rotation_unroll_factor / stride_w);
+                    * unroll_factor / stride_w);
 
-                add(reg_inp_prf, mb_block * typesize * rotation_unroll_factor);
+                add(reg_inp_prf, mb_block * typesize * unroll_factor);
 
                 dec(iw_itr_reg);
                 jnz(iw_loop_label, T_NEAR);
 
             }
 
-            sub(reg_inp, mb_block * typesize * rotation_unroll_factor * niter);
-            sub(reg_out, oc_block * cur_oc_buffs * mb_block * typesize
-                * rotation_unroll_factor / stride_w * niter);
-            sub(reg_inp_prf, mb_block * typesize * rotation_unroll_factor * niter);
-
             mov(reg_channel, ptr[param + GET_OFF(channel)]);
 
             for (int ii = r_iw; ii < iw; ii++) {
-                comp_unrolled(ii, cur_oc_buffs);
+                comp_step(ii, unroll_factor * niter, cur_oc_buffs);
             }
 
 
@@ -2277,7 +2258,7 @@ void jit_avx512_common_conv_bwd_weights_kernel_f32::compute_loop_fma_sparse() {
             mov(reg_channel, ptr[param + GET_OFF(channel)]);
 
             for (int ii = 0; ii < iw; ii++) {
-                comp_unrolled(ii, cur_oc_buffs);
+                comp_step(ii, 0, cur_oc_buffs);
             }
         }
     };
